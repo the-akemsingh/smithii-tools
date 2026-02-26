@@ -26,7 +26,10 @@ export default function WalletTokensPage() {
 
 
     const getAllTokens = useCallback(async () => {
-        if (!wallet.publicKey) return;
+        if (!wallet.publicKey) {
+            alert("Connect your wallet first");
+            return;
+        };
 
         const spl_tokens = await connection.getParsedTokenAccountsByOwner(
             wallet.publicKey,
