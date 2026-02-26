@@ -79,12 +79,18 @@ export default function WalletTokensPage() {
 
     const revokeMintAuthority = async (mintAddress: PublicKey[]) => {
         try {
+            if (!wallet.publicKey) {
+                return;
+            }
             const transaction = new Transaction()
             mintAddress.forEach(address => {
                 transaction.add(
-                    createSetAuthorityInstruction(address, wallet.publicKey as PublicKey, AuthorityType.MintTokens, null)
+                    createSetAuthorityInstruction(address, wallet.publicKey as PublicKey, AuthorityType.MintTokens, null, [], TOKEN_2022_PROGRAM_ID)
                 )
             });
+            transaction.feePayer = wallet.publicKey;
+            transaction.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+
             const signature = await wallet.sendTransaction(transaction, connection);
             await connection.confirmTransaction(signature, "confirmed");
             setSelectedTokens(new Set());
