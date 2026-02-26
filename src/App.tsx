@@ -1,13 +1,14 @@
-import AirDrop from './AirDrop'
 import './App.css'
 import Navbar from './components/Navbar'
-import LaunchToken from './LaunchToken'
+import LaunchTokenPage from './pages/LaunchTokenPage'
+import SendTokensPage from './pages/SendTokensPage'
+import WalletTokensPage from './pages/WalletTokensPage'
 import SendSolana from './SendSolana'
 import { createBrowserRouter, Outlet, RouterProvider } from 'react-router-dom'
 
 function AppLayout() {
   return (
-    <div className="flex min-h-screen bg-linear-to-b from-slate-900 via-slate-950 to-black">
+    <div className="flex cal-sans min-h-screen ">
       <Navbar />
       <main className="flex-1 overflow-auto">
         <Outlet />
@@ -26,12 +27,16 @@ function App() {
           element: <SendSolana />,
         },
         {
-          path: 'airdrop',
-          element: <AirDrop />,
+          path: 'launch-token',
+          element: <LaunchTokenPage />,
         },
         {
-          path: 'launch-token',
-          element: <LaunchToken />,
+          path: 'send-tokens',
+          element: <SendTokensPage />,
+        },
+        {
+          path: 'wallet-tokens',
+          element: <WalletTokensPage />,
         },
       ],
     },

@@ -6,10 +6,13 @@
 //on-chain state vs indexed state
 
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
-import { Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction, type ParsedAccountData } from "@solana/web3.js";
-import { useEffect, useState } from "react";
-import { AuthorityType, createAssociatedTokenAccountInstruction, createInitializeMetadataPointerInstruction, createInitializeMint2Instruction, createInitializeMintInstruction, createMintToInstruction, createSetAuthorityInstruction, ExtensionType, getAssociatedTokenAddressSync, getMetadataPointerState, getMinimumBalanceForRentExemptMint, getMintLen, getTokenMetadata, LENGTH_SIZE, MINT_SIZE, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, TYPE_SIZE, unpackMint } from "@solana/spl-token"
-import { createInitializeInstruction, pack, unpack, type TokenMetadata } from "@solana/spl-token-metadata";
+import { Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { AuthorityType, createAssociatedTokenAccountInstruction, createInitializeMetadataPointerInstruction, createInitializeMintInstruction, createMintToInstruction, createSetAuthorityInstruction, ExtensionType, getAssociatedTokenAddressSync, getMintLen, LENGTH_SIZE, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, TYPE_SIZE } from "@solana/spl-token"
+import { createInitializeInstruction, pack } from "@solana/spl-token-metadata";
+import TokenRow from "./components/TokenRow";
+import EnrichTokensWithAuthoritiesField from "./utils/EnrichTokensWithAuthorityFields";
+import EnrichTokenWithMetadata from "./utils/EnrichTokenWithMetadata";
 
 export default function LaunchToken() {
     const [tokenName, setTokenName] = useState<string>("");
@@ -29,12 +32,15 @@ export default function LaunchToken() {
         freezeAuthority: string | null,
         name: string | null,
         symbol: string | null,
-        uri: string | null
+        uri: string | null,
+        decimals: number
     }[] | null>(null);
     const [selectedTokens, setSelectedTokens] = useState<Set<PublicKey>>(new Set());
     const [expandedLaunch, setExpandedLaunch] = useState(true);
     const [expandedAirdrop, setExpandedAirdrop] = useState(true);
     const [expandedTokens, setExpandedTokens] = useState(true);
+    const [selectedAirdropMint, setSelectedAirdropMint] = useState<PublicKey | null>(null);
+    const [createdMints, setCreatedMints] = useState<{ mintAddress: PublicKey; symbol: string; name: string; programId: PublicKey }[]>([]);
 
 
     const getBalance = async () => {
@@ -66,135 +72,24 @@ export default function LaunchToken() {
                 freezeAuthority: null,
                 name: null,
                 symbol: null,
-                uri: null
+                uri: null,
+                decimals: parsedInfo.tokenAmount.decimals
             }
         }).filter((token) => token.amount > 0);
 
         if (mintDetails.length !== 0) {
-            const tokensEnrichedWithMetaData = await enrichMetaData(mintDetails);
-            let enriched = await enrichMintAuthorities(tokensEnrichedWithMetaData);
+            const tokensEnrichedWithMetaData = await EnrichTokenWithMetadata(mintDetails, connection);
+            let enriched = await EnrichTokensWithAuthoritiesField(tokensEnrichedWithMetaData, connection);
             setAllTokens(enriched);
         }
 
     }
 
-    const enrichMetaData = async (
-        allTokens:
-            {
-                mintAddress: PublicKey,
-                amount: number,
-                owner: string,
-                mintAuthority: string | null,
-                freezeAuthority: string | null,
-                name: string | null,
-                symbol: string | null,
-                uri: string | null,
-            }[]): Promise<{
-                mintAddress: PublicKey;
-                amount: number;
-                owner: string;
-                mintAuthority: string | null;
-                freezeAuthority: string | null;
-                name: string | null;
-                symbol: string | null;
-                uri: string | null;
-            }[]> => {
-        const enrichedTokensWithMetaData = await Promise.all(allTokens.map(async (token) => {
-            try {
-                const tokenMintAccount = await connection.getAccountInfo(token.mintAddress);
-                const unPackedMint = unpackMint(token.mintAddress, tokenMintAccount, TOKEN_2022_PROGRAM_ID);
-                const metaDataPointerState = getMetadataPointerState(unPackedMint);
-                if (metaDataPointerState && metaDataPointerState.metadataAddress) {
-                    const metaDataAccountAddress = metaDataPointerState.metadataAddress;
-                    let metaData: TokenMetadata | null;
-                    if (new PublicKey(token.mintAddress).equals(metaDataAccountAddress)) { //it means token is created using metadata pointer, and in that  name,symbol,uri are  saved in same account (token mint)
-                        metaData = await getTokenMetadata(connection, token.mintAddress);
-                        if (metaData) {
-                            let imageUrl;
-                            try {
-                                const res = await fetch(metaData.uri);
-                                const json = await res.json();
-                                console.log("*********************", json)
-                                imageUrl = json.image;
-                            } catch (e) {
-                                console.log("failed to load offchain metadata", e);
-                            }
-                            return {
-                                ...token,
-                                name: metaData.name,
-                                symbol: metaData.symbol,
-                                uri: imageUrl
-                            };
-                        }
-                        return token;
-                    }
-                    //this logic still needs to be implemented
-                    const metaDataAccountInfo = await connection.getAccountInfo(metaDataAccountAddress);
-                    metaData = unpack(metaDataAccountInfo?.data);
-                    return token;
-                }
-                return token;
-            } catch (e) {
-                console.log("Error", e);
-                return token;
-            }
-        }));
-        return enrichedTokensWithMetaData;
-    }
     useEffect(() => {
         getBalance();
         getAllTokens();
     }, [wallet.publicKey])
 
-    const enrichMintAuthorities = async (
-        allTokens:
-            {
-                mintAddress: PublicKey,
-                amount: number,
-                owner: string,
-                mintAuthority: string | null,
-                freezeAuthority: string | null,
-                name: string | null,
-                symbol: string | null,
-                uri: string | null,
-
-            }[]
-    )
-        : Promise<{
-            mintAddress: PublicKey;
-            amount: number;
-            owner: string;
-            mintAuthority: string | null;
-            freezeAuthority: string | null;
-            name: string | null;
-            symbol: string | null;
-            uri: string | null;
-        }[]
-        > => {
-        try {
-            //TODO : batch them - getMultipleAccountsInfo
-            const tokensInfo = await Promise.all(allTokens.map(async (token) => {
-                const data = await connection.getParsedAccountInfo(token.mintAddress)
-                return { mintAddress: token.mintAddress, data };
-            }))
-            const updatedTokensMetaData = allTokens.map((token) => {
-                const info = tokensInfo.find(t => new PublicKey(t.mintAddress).equals(token.mintAddress));
-                if (!info || !info.data.value) {
-                    return token;
-                }
-                const accountData = (info?.data.value.data) as ParsedAccountData;
-                return {
-                    ...token,
-                    mintAuthority: accountData.parsed.info.mintAuthority,
-                    freezeAuthority: accountData.parsed.info.freezeAuthority
-                }
-            })
-            return updatedTokensMetaData;
-        } catch (e) {
-            console.log(e);
-            return allTokens;
-        }
-    }
 
     async function createToken() {
         try {
@@ -252,49 +147,71 @@ export default function LaunchToken() {
             transaction.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
             transaction.partialSign(mintKeypair);
 
-            const sim = await connection.simulateTransaction(transaction);
-            console.log(sim.value.logs);
-
             const signature = await wallet.sendTransaction(transaction, connection);
             await connection.confirmTransaction(signature, "confirmed")
             setMintKeyPair(mintKeypair);
+            setCreatedMints(prev => [...prev, { mintAddress: mintKeypair.publicKey, symbol: tokenSymbol, name: tokenName, programId: TOKEN_2022_PROGRAM_ID }]);
+            setSelectedAirdropMint(mintKeypair.publicKey);
             alert("Mint Created");
         } catch (e) {
             console.log(e)
         }
     }
 
+    const toggleToken = useCallback((mintAddress: PublicKey, checked: boolean) => {
+        setSelectedTokens(prev => {
+            const next = new Set(prev);
+            if (checked) next.add(mintAddress);
+            else next.delete(mintAddress);
+            return next;
+        });
+    }, []);
+
+    const airdropMintOptions = useMemo(() => {
+        const walletBase58 = wallet.publicKey?.toBase58();
+        const fromWallet = (allTokens ?? [])
+            .filter(t => t.mintAuthority === walletBase58)
+            .map(t => ({ mintAddress: t.mintAddress, label: t.symbol ? `${t.symbol} (${t.mintAddress.toBase58().slice(0, 6)}…)` : t.mintAddress.toBase58() }));
+        const allTokenMints = new Set((allTokens ?? []).map(t => t.mintAddress.toBase58()));
+        const fromCreated = createdMints
+            .filter(m => !allTokenMints.has(m.mintAddress.toBase58()))
+            .map(m => ({ mintAddress: m.mintAddress, label: m.symbol ? `${m.symbol} (${m.mintAddress.toBase58().slice(0, 6)}…)` : m.mintAddress.toBase58() }));
+        return [...fromWallet, ...fromCreated];
+    }, [allTokens, createdMints, wallet.publicKey]);
+
     //for creating token using core  token spl program - NO METADATA
-    const launchToken = async () => {
-        if (!wallet.publicKey) {
-            alert("Connect wallet first");
-            return;
-        }
+    // const launchToken = async () => {
+    //     if (!wallet.publicKey) {
+    //         alert("Connect wallet first");
+    //         return;
+    //     }
 
-        const newMintKeyPair = Keypair.generate();
-        setMintKeyPair(newMintKeyPair);
-        const lamports = await getMinimumBalanceForRentExemptMint(connection);
-        const transaction = new Transaction().add(
-            SystemProgram.createAccount({
-                fromPubkey: wallet.publicKey,
-                lamports,
-                space: MINT_SIZE,
-                newAccountPubkey: newMintKeyPair.publicKey,
-                programId: TOKEN_PROGRAM_ID
-            }),
-            createInitializeMint2Instruction(newMintKeyPair.publicKey, tokenDecimals, wallet.publicKey, wallet.publicKey)
-        )
-        transaction.feePayer = wallet.publicKey;
-        const recentBlockHash = (await connection.getLatestBlockhash()).blockhash;
-        transaction.recentBlockhash = recentBlockHash;
+    //     const newMintKeyPair = Keypair.generate();
+    //     setMintKeyPair(newMintKeyPair);
+    //     const lamports = await getMinimumBalanceForRentExemptMint(connection);
+    //     const transaction = new Transaction().add(
+    //         SystemProgram.createAccount({
+    //             fromPubkey: wallet.publicKey,
+    //             lamports,
+    //             space: MINT_SIZE,
+    //             newAccountPubkey: newMintKeyPair.publicKey,
+    //             programId: TOKEN_PROGRAM_ID
+    //         }),
+    //         createInitializeMint2Instruction(newMintKeyPair.publicKey, tokenDecimals, wallet.publicKey, wallet.publicKey)
+    //     )
+    //     transaction.feePayer = wallet.publicKey;
+    //     const recentBlockHash = (await connection.getLatestBlockhash()).blockhash;
+    //     transaction.recentBlockhash = recentBlockHash;
 
-        transaction.partialSign(newMintKeyPair);
-        await wallet.sendTransaction(transaction, connection);
-        getBalance();
+    //     transaction.partialSign(newMintKeyPair);
+    //     await wallet.sendTransaction(transaction, connection);
+    //     getBalance();
+    //     setCreatedMints(prev => [...prev, { mintAddress: newMintKeyPair.publicKey, symbol: tokenSymbol, name: tokenName, programId: TOKEN_PROGRAM_ID }]);
+    //     setSelectedAirdropMint(newMintKeyPair.publicKey);
 
-        alert(`token mint created: ${newMintKeyPair.publicKey}`);
+    //     alert(`token mint created: ${newMintKeyPair.publicKey}`);
 
-    }
+    // }
 
     //TODO : owner can select, the token owned where mint auth is enabled - and aiardrop to given address
     const AirdropToAddress = async (mintPublicKey: PublicKey) => {
@@ -308,12 +225,18 @@ export default function LaunchToken() {
                 return;
             }
 
+            // Detect which token program owns this mint so both SPL and Token-2022 mints work
+            const mintAccountInfo = await connection.getAccountInfo(mintPublicKey);
+            const programId = mintAccountInfo?.owner.equals(TOKEN_2022_PROGRAM_ID)
+                ? TOKEN_2022_PROGRAM_ID
+                : TOKEN_PROGRAM_ID;
+
             //finding the Associated Token Address for the receiver's account
             const accountAddress = getAssociatedTokenAddressSync(
                 mintPublicKey,
                 new PublicKey(mintToAddress),
                 false,
-                TOKEN_2022_PROGRAM_ID
+                programId
             );
 
             const isAtaExists = await connection.getAccountInfo(accountAddress);
@@ -325,7 +248,7 @@ export default function LaunchToken() {
                         accountAddress,
                         new PublicKey(mintToAddress),
                         mintPublicKey,
-                        TOKEN_2022_PROGRAM_ID
+                        programId
                     ))
                 const signature = await wallet.sendTransaction(transaction, connection);
                 await connection.confirmTransaction(signature, "confirmed");
@@ -338,16 +261,12 @@ export default function LaunchToken() {
                 wallet.publicKey,
                 mintAmount * (10 ** tokenDecimals),
                 [],
-                TOKEN_2022_PROGRAM_ID
+                programId
             )
             const transaction2 = new Transaction().add(mintTokenInstruction);
             const signature = await wallet.sendTransaction(transaction2, connection);
             await connection.confirmTransaction(signature, "confirmed");
             await getBalance();
-            /*
-            Cant do this below : if (new PublicKey(mintToAddress) === wallet.publicKey) getAllTokens();
-            as PublicKey is a object and objects in js are compared by reference, so they will never be same
-            */
             if (new PublicKey(mintToAddress).equals(wallet.publicKey)) {
                 //TODO : we should use polling
                 setTimeout(() => {
@@ -373,7 +292,11 @@ export default function LaunchToken() {
             const signature = await wallet.sendTransaction(transaction, connection);
             await connection.confirmTransaction(signature, "confirmed");
             setSelectedTokens(new Set());
-            if (allTokens) setAllTokens(await enrichMintAuthorities(allTokens));
+            setCreatedMints(prev => prev.filter(m => !mintAddress.some(a => a.equals(m.mintAddress))));
+            if (selectedAirdropMint && mintAddress.some(a => a.equals(selectedAirdropMint))) {
+                setSelectedAirdropMint(null);
+            }
+            if (allTokens) setAllTokens(await EnrichTokensWithAuthoritiesField(allTokens, connection));
             alert("mint authority revoked")
         } catch (e) {
             console.log(e);
@@ -391,7 +314,7 @@ export default function LaunchToken() {
             const signature = await wallet.sendTransaction(transaction, connection);
             await connection.confirmTransaction(signature, "confirmed");
             setSelectedTokens(new Set());
-            if (allTokens) setAllTokens(await enrichMintAuthorities(allTokens));
+            if (allTokens) setAllTokens(await EnrichTokensWithAuthoritiesField(allTokens, connection));
             alert("freeze authority revoked")
         } catch (e) {
             console.log(e);
@@ -494,6 +417,21 @@ export default function LaunchToken() {
                 {expandedAirdrop && (
                     <div className="px-6 py-5 flex flex-col gap-4">
                         <div className="flex flex-col gap-1.5">
+                            <label className="text-xs font-medium text-slate-300">Token Mint</label>
+                            <select
+                                value={selectedAirdropMint?.toBase58() ?? ""}
+                                onChange={(e) => setSelectedAirdropMint(e.target.value ? new PublicKey(e.target.value) : null)}
+                                className="w-full rounded-xl border border-slate-700 bg-slate-900/70 px-3 py-2.5 text-sm text-slate-50 outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-500/40 transition"
+                            >
+                                <option value="">Select a token mint…</option>
+                                {airdropMintOptions.map(opt => (
+                                    <option key={opt.mintAddress.toBase58()} value={opt.mintAddress.toBase58()}>
+                                        {opt.label}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                        <div className="flex flex-col gap-1.5">
                             <label className="text-xs font-medium text-slate-300">Amount</label>
                             <input type="number" min={0} className="w-full rounded-xl border border-slate-700 bg-slate-900/70 px-3 py-2.5 text-sm text-slate-50 placeholder:text-slate-500 outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-500/40 transition [-moz-appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" placeholder="Enter the airdrop amount" onChange={(e) => {
                                 setMintAmount(Number(e.target.value));
@@ -506,11 +444,11 @@ export default function LaunchToken() {
                             }} />
                         </div>
                         <button className="inline-flex items-center justify-center rounded-xl border border-amber-500/70 bg-amber-500 text-sm font-semibold text-slate-950 px-4 py-2.5 shadow-lg shadow-amber-500/30 hover:bg-amber-400 hover:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-500/40 focus:ring-offset-2 focus:ring-offset-slate-950 transition cursor-pointer" onClick={() => {
-                            if (!mintKeyPair) {
-                                alert("Select mint to airdrop");
+                            if (!selectedAirdropMint) {
+                                alert("Select a token mint to airdrop");
                                 return;
                             }
-                            AirdropToAddress(mintKeyPair.publicKey)
+                            AirdropToAddress(selectedAirdropMint);
                         }}
                         >Airdrop</button>
                     </div>
@@ -533,43 +471,15 @@ export default function LaunchToken() {
                     <div className="px-6 py-5 flex flex-col gap-4">
                         {allTokens ? (
                             <div className="flex flex-col gap-3">
-                                {allTokens.map((token) => {
-                                    //TODO (study about memoization) : const selected = useMemo(() => selectedTokens, [selectedTokens]);
-                                    const isSelected = selectedTokens.has(token.mintAddress);
-                                    console.log(token.symbol)
-                                    console.log(token.uri)
-                                    console.log(token)
-                                    return (
-                                        <div key={token.mintAddress.toString()} className="flex items-center gap-3 p-3 border border-slate-700 rounded-lg bg-slate-900/50">
-                                            <input
-                                                type={"checkbox"}
-                                                checked={isSelected}
-                                                onChange={(e) => {
-                                                    setSelectedTokens(prev => {
-                                                        const next = new Set(prev);
-                                                        if (e.target.checked) next.add(token.mintAddress);
-                                                        else next.delete(token.mintAddress);
-                                                        return next;
-                                                    })
-                                                }}
-                                                className={`w-4 h-4 text-emerald-500 bg-slate-800 border-slate-600 rounded focus:ring-emerald-500 focus:ring-2 ${(token.freezeAuthority && wallet.publicKey && new PublicKey(token.freezeAuthority).equals(wallet.publicKey)) ||
-                                                    (token.mintAuthority && wallet.publicKey && new PublicKey(token.mintAuthority).equals(wallet.publicKey))
-                                                    ? "block"
-                                                    : "hidden"
-                                                    } `}
-                                            />
-                                            <div className="flex-1 flex flex-col gap-1">
-                                                <span className="text-white flex gap-4 text-sm font-mono">
-                                                    {token.uri && <img src={token.uri} alt="token image" height={10} width={10} />}
-                                                    {token.symbol ? <span>{token.symbol}</span> : token.mintAddress.toString()}
-                                                </span>
-                                                <span className="text-slate-400 text-xs">
-                                                    Amount: {token.amount}
-                                                </span>
-                                            </div>
-                                        </div>
-                                    );
-                                })}
+                                {allTokens.map((token) => (
+                                    <TokenRow
+                                        key={token.mintAddress.toString()}
+                                        token={token}
+                                        isSelected={selectedTokens.has(token.mintAddress)}
+                                        walletPublicKey={wallet.publicKey}
+                                        onToggle={toggleToken}
+                                    />
+                                ))}
                                 {wallet.publicKey && allTokens && allTokens.some(token =>
                                     selectedTokens.has(token.mintAddress) && token.owner === wallet.publicKey!.toBase58()
                                 ) && (
